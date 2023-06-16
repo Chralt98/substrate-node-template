@@ -1,22 +1,29 @@
+// TODO: Why do we need the following line?
 #![cfg_attr(not(feature = "std"), no_std)]
 
+extern crate alloc;
+
+// TODO: Why is it useful to write `pub` here?
 pub use pallet::*;
 
+use alloc::vec::Vec;
 use codec::{Decode, Encode, MaxEncodedLen};
-use frame_support::sp_runtime::traits::CheckedDiv;
-use frame_support::sp_runtime::traits::CheckedSub;
-use frame_support::sp_runtime::traits::Zero;
-use frame_support::traits::ExistenceRequirement;
-use frame_support::traits::{Currency, WithdrawReasons};
+use frame_support::sp_runtime::traits::{CheckedDiv, CheckedSub, One, Zero};
+use frame_support::sp_runtime::Saturating;
+use frame_support::traits::{
+	BalanceStatus, Currency, ExistenceRequirement, ReservableCurrency, WithdrawReasons,
+};
 use frame_support::PalletId;
 use scale_info::TypeInfo;
 
+// TODO: Why do we typically have a `mock` module?
 #[cfg(test)]
 mod mock;
 
 #[cfg(test)]
 mod tests;
 
+// TODO: What is this and what does it do?
 #[cfg(feature = "runtime-benchmarks")]
 mod benchmarking;
 pub mod weights;
@@ -33,8 +40,9 @@ pub enum MarketStatus {
 }
 
 #[derive(Decode, Encode, MaxEncodedLen, TypeInfo, Clone, Debug, PartialEq, Eq)]
-pub struct Market<AccountId, BlockNumber> {
+pub struct Market<AccountId, BlockNumber, Balance> {
 	pub creator: AccountId,
+	pub bond: Balance,
 	pub data: [u8; 32],
 	pub end: BlockNumber,
 	pub oracle: AccountId,
@@ -49,23 +57,26 @@ pub struct Outcome<AccountId, Balance> {
 	pub price: Balance,
 }
 
+// TODO: What are `CheckedDiv + Zero` called?
+// TODO: Why can't we just remove `CheckedDiv`?
+// TODO: What does `CheckedDiv + Zero` mean for `Balance`?
 impl<AccountId, Balance: CheckedDiv + Zero> Outcome<AccountId, Balance> {
-	pub fn probability(&self, total: Balance) -> Balance {
-		self.price.checked_div(&total).unwrap_or(Zero::zero())
+	pub fn p(&self, t: Balance) -> Balance {
+		self.price.checked_div(&t).unwrap_or(Zero::zero())
 	}
 }
 
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
-	use frame_support::{pallet_prelude::*, traits::ReservableCurrency};
+	use frame_support::pallet_prelude::*;
 	use frame_system::pallet_prelude::*;
 
 	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
 	pub type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
 	pub type BalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::Balance;
-	pub type MarketOf<T> = Market<AccountIdOf<T>, BlockNumberFor<T>>;
+	pub type MarketOf<T> = Market<AccountIdOf<T>, BlockNumberFor<T>, BalanceOf<T>>;
 	pub type OutcomesOf<T> =
 		BoundedVec<Outcome<AccountIdOf<T>, BalanceOf<T>>, <T as Config>::MaxOutcomes>;
 
@@ -85,6 +96,9 @@ pub mod pallet {
 		type CreatorBond: Get<BalanceOf<Self>>;
 
 		#[pallet::constant]
+		type MarketCreatorClearStorageTime: Get<Self::BlockNumber>;
+
+		#[pallet::constant]
 		type MaxOutcomes: Get<u32>;
 
 		#[pallet::constant]
@@ -95,9 +109,16 @@ pub mod pallet {
 		type WeightInfo: WeightInfo;
 	}
 
+	// TODO: What does this do?
+	#[pallet::type_value]
+	pub fn DefaultMarketCounter<T: Config>() -> MarketId {
+		1u128
+	}
+
 	#[pallet::storage]
 	#[pallet::getter(fn market_counter)]
-	pub type MarketCounter<T: Config> = StorageValue<_, MarketId, ValueQuery>;
+	pub type MarketCounter<T: Config> =
+		StorageValue<_, MarketId, ValueQuery, DefaultMarketCounter<T>>;
 
 	#[pallet::storage]
 	pub type Markets<T: Config> =
@@ -122,6 +143,8 @@ pub mod pallet {
 		MarketCreated { market_id: MarketId, creator: T::AccountId },
 		MarketDestroyed { market_id: MarketId },
 		OutcomeBought { market_id: MarketId, outcome_index: u8, buyer: T::AccountId },
+		MarketsToCloseNextBlock { market_ids: Vec<MarketId> },
+		MarketClosed { market_id: MarketId },
 		MarketReported { market_id: MarketId, oracle_report_outcome: u8 },
 		MarketRedeemed { market_id: MarketId, winner_outcome: u8, winner: T::AccountId },
 		HighestOutcome { market_id: MarketId, highest_outcome: Option<u8> },
@@ -144,6 +167,8 @@ pub mod pallet {
 		OutcomeNotReportedYet,
 		InvalidMarketStatus,
 		InsufficientCreatorBalance,
+		OnlyMarketCreatorAllowedYet,
+		Invalid,
 	}
 
 	#[pallet::hooks]
@@ -151,15 +176,18 @@ pub mod pallet {
 		fn on_initialize(n: T::BlockNumber) -> Weight {
 			let mut total_weight = Weight::zero();
 
+			// TODO What comes to your mind when you see the `total_weight` calculation?
 			total_weight = total_weight.saturating_add(T::DbWeight::get().reads(1));
 			let market_ids = <MarketIdsPerCloseBlock<T>>::get(n);
 			for market_id in market_ids {
 				total_weight = total_weight.saturating_add(T::DbWeight::get().reads(1));
 				if let Some(mut market) = <Markets<T>>::get(market_id) {
+					// TODO Why could this `debug_assert!` be useful here?
 					debug_assert!(market.status == MarketStatus::Active, "MarketIdsPerCloseBlock should only contain active markets! Invalid market id: {:?}", market_id);
 					market.status = MarketStatus::Closed;
 					total_weight = total_weight.saturating_add(T::DbWeight::get().writes(1));
 					<Markets<T>>::insert(market_id, market);
+					Self::deposit_event(Event::MarketClosed { market_id });
 				};
 			}
 			total_weight = total_weight.saturating_add(T::DbWeight::get().writes(1));
@@ -168,7 +196,10 @@ pub mod pallet {
 			total_weight
 		}
 
-		fn on_finalize(_n: T::BlockNumber) {}
+		fn on_finalize(n: T::BlockNumber) {
+			// TODO What should be kept in mind, when using `on_finalize`?
+			Self::on_finalize_impl(n);
+		}
 
 		fn on_idle(_n: T::BlockNumber, mut remaining_weight: Weight) -> Weight {
 			if let Some(count) =
@@ -206,11 +237,9 @@ pub mod pallet {
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
-			let creator_bond = T::CreatorBond::get();
-			ensure!(
-				T::Currency::can_reserve(&who, creator_bond),
-				Error::<T>::InsufficientCreatorBalance
-			);
+			let bond = T::CreatorBond::get();
+			// TODO: Why do we check `can_reserve` here? Why not just using `reserve` alone?
+			ensure!(T::Currency::can_reserve(&who, bond), Error::<T>::InsufficientCreatorBalance);
 
 			ensure!(!outcome_amount.is_zero(), Error::<T>::OutcomeAmountTooLow);
 
@@ -235,6 +264,7 @@ pub mod pallet {
 
 			let market = Market {
 				creator: who.clone(),
+				bond,
 				data: Default::default(),
 				end,
 				oracle,
@@ -249,7 +279,8 @@ pub mod pallet {
 				Ok(())
 			})?;
 
-			T::Currency::reserve(&who, creator_bond)?;
+			// TODO Why could we want to reserve the bond here?
+			T::Currency::reserve(&who, bond)?;
 
 			<Outcomes<T>>::insert(market_id, outcomes);
 			<Markets<T>>::insert(market_id, market);
@@ -260,8 +291,10 @@ pub mod pallet {
 			Ok(())
 		}
 
+		// TODO What does `Pays::No` mean? Why is it only placed here?
+		// TODO What does `DispatchClass::Operational` mean? Why is it only placed here?
 		#[pallet::call_index(1)]
-		#[pallet::weight(T::WeightInfo::do_something())]
+		#[pallet::weight((T::WeightInfo::do_something(), DispatchClass::Operational, Pays::No))]
 		pub fn destroy_market(
 			origin: OriginFor<T>,
 			#[pallet::compact] market_id: MarketId,
@@ -278,8 +311,12 @@ pub mod pallet {
 			Ok(())
 		}
 
+		// TODO: What could be done instead of `Pays::Yes` to get the same effect? 
+		// TODO: What does `DispatchClass::Normal` mean?
+		// TODO: Why could this `transactional` be useful here? Why is not used in other calls?
 		#[pallet::call_index(2)]
-		#[pallet::weight(T::WeightInfo::do_something())]
+		#[pallet::weight((T::WeightInfo::do_something(), DispatchClass::Normal, Pays::Yes))]
+		#[frame_support::transactional]
 		pub fn buy_outcome(
 			origin: OriginFor<T>,
 			#[pallet::compact] market_id: MarketId,
@@ -333,6 +370,8 @@ pub mod pallet {
 			Ok(())
 		}
 
+		// TODO: What could the users do, if the oracle is not honest?
+		// TODO: What is done at Zeitgeist to solve this problem?
 		#[pallet::call_index(3)]
 		#[pallet::weight(T::WeightInfo::do_something())]
 		pub fn report_as_oracle(
@@ -399,22 +438,66 @@ pub mod pallet {
 
 			Ok(())
 		}
+
+		#[pallet::call_index(5)]
+		#[pallet::weight(T::WeightInfo::do_something())]
+		pub fn clear_storage(
+			origin: OriginFor<T>,
+			#[pallet::compact] market_id: MarketId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			let market = <Markets<T>>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
+			ensure!(market.status == MarketStatus::Redeemed, Error::<T>::InvalidMarketStatus);
+
+			let now = <frame_system::Pallet<T>>::block_number();
+			let end = market.end;
+			if now.saturating_sub(end) <= T::MarketCreatorClearStorageTime::get() {
+				ensure!(market.creator == who, Error::<T>::OnlyMarketCreatorAllowedYet);
+			}
+
+			if who != market.creator {
+				// TODO Why don't I use a question mark operator here?
+				let res = T::Currency::repatriate_reserved(
+					&market.creator,
+					&who,
+					market.bond,
+					BalanceStatus::Free,
+				);
+				debug_assert!(res.is_ok());
+			} else {
+				T::Currency::unreserve(&market.creator, market.bond);
+			}
+
+			<Markets<T>>::remove(market_id);
+			<Outcomes<T>>::remove(market_id);
+
+			Ok(())
+		}
 	}
 
 	impl<T: Config> Pallet<T> {
-		pub fn get_outcome_probability(
-			outcomes: OutcomesOf<T>,
-			outcome_index: u8,
-		) -> Result<BalanceOf<T>, DispatchError> {
+		pub fn on_finalize_impl(n: T::BlockNumber) {
+			let next_block = n.saturating_add(One::one());
+			let market_ids_to_close_next_block = <MarketIdsPerCloseBlock<T>>::get(next_block);
+			if market_ids_to_close_next_block.is_empty() {
+				return;
+			}
+			Self::deposit_event(Event::MarketsToCloseNextBlock {
+				market_ids: market_ids_to_close_next_block.into_inner(),
+			});
+		}
+
+		// TODO What could be the purpose of this function?
+		pub fn g(o: OutcomesOf<T>, i: u8) -> Result<BalanceOf<T>, DispatchError> {
 			use frame_support::sp_runtime::SaturatedConversion;
-			let total = outcomes
+			let t = o
 				.iter()
-				.map(|outcome| outcome.price.saturated_into::<u128>())
+				.map(|j| j.price.saturated_into::<u128>())
 				.sum::<u128>()
 				.saturated_into::<BalanceOf<T>>();
-			let outcome =
-				outcomes.get(outcome_index as usize).ok_or(Error::<T>::InvalidOutcomeIndex)?;
-			Ok(outcome.probability(total))
+			let u = o.get(i as usize).ok_or(Error::<T>::Invalid)?;
+			Ok(u.p(t))
 		}
 
 		pub fn emit_highest_outcomes(count: usize) -> Weight {
@@ -437,4 +520,38 @@ pub mod pallet {
 			T::PalletId::get().into_sub_account_truncating(market_id)
 		}
 	}
+
+	impl<T> MarketApi for Pallet<T>
+	where
+		T: Config,
+	{
+		type MarketId = MarketId;
+		type AccountId = T::AccountId;
+		type Balance = BalanceOf<T>;
+		type BlockNumber = T::BlockNumber;
+
+		fn get_market(market_id: &Self::MarketId) -> Result<(Weight, MarketOf<T>), DispatchError> {
+			let weight = T::DbWeight::get().reads(1);
+			let market = <Markets<T>>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
+			Ok((weight, market))
+		}
+	}
+}
+
+// TODO: Imagine this trait is defined outside of this pallet. Why could this be useful?
+trait MarketApi {
+	type MarketId;
+	type AccountId;
+	type Balance;
+	type BlockNumber;
+
+	fn get_market(
+		market_id: &Self::MarketId,
+	) -> Result<
+		(
+			frame_support::pallet_prelude::Weight,
+			Market<Self::AccountId, Self::BlockNumber, Self::Balance>,
+		),
+		frame_support::pallet_prelude::DispatchError,
+	>;
 }
