@@ -6,14 +6,10 @@ extern crate alloc;
 // TODO: Why is it useful to write `pub` here?
 pub use pallet::*;
 
-use alloc::vec::Vec;
 use codec::{Decode, Encode, MaxEncodedLen};
-use frame_support::sp_runtime::traits::{CheckedDiv, CheckedSub, One, Zero};
-use frame_support::sp_runtime::Saturating;
-use frame_support::traits::{
-	BalanceStatus, Currency, ExistenceRequirement, ReservableCurrency, WithdrawReasons,
-};
-use frame_support::PalletId;
+use frame_support::pallet_prelude::Weight;
+use frame_support::sp_runtime::traits::{CheckedDiv, Zero};
+
 use scale_info::TypeInfo;
 
 // TODO: Why do we typically have a `mock` module?
@@ -26,8 +22,6 @@ mod tests;
 // TODO: What is this and what does it do?
 #[cfg(feature = "runtime-benchmarks")]
 mod benchmarking;
-pub mod weights;
-pub use weights::*;
 
 pub type MarketId = u128;
 
@@ -66,11 +60,28 @@ impl<AccountId, Balance: CheckedDiv + Zero> Outcome<AccountId, Balance> {
 	}
 }
 
+pub trait WeightInfo {
+	fn do_something() -> Weight;
+}
+
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
+	use alloc::vec::Vec;
 	use frame_support::pallet_prelude::*;
+	use frame_support::sp_runtime::traits::{CheckedSub, One};
+	use frame_support::traits::{
+		BalanceStatus, Currency, ExistenceRequirement, ReservableCurrency, WithdrawReasons,
+	};
+	use frame_support::PalletId;
 	use frame_system::pallet_prelude::*;
+    use frame_support::sp_runtime::traits::Saturating;
+
+    impl<T: Config> WeightInfo for Pallet<T> {
+        fn do_something() -> Weight {
+            Weight::zero()
+        }
+    }
 
 	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
@@ -88,7 +99,7 @@ pub mod pallet {
 
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 
 		type Currency: ReservableCurrency<Self::AccountId>;
 
@@ -202,8 +213,7 @@ pub mod pallet {
 		}
 
 		fn on_idle(_n: T::BlockNumber, mut remaining_weight: Weight) -> Weight {
-			if let Some(count) =
-				remaining_weight.checked_div_per_component(&T::WeightInfo::do_something())
+			if let Some(count) = remaining_weight.checked_div(T::WeightInfo::do_something())
 			{
 				// assume this `emit_highest_outcomes` has `do_something` weight
 				let consumed_weight = Self::emit_highest_outcomes(count as usize);
@@ -244,7 +254,6 @@ pub mod pallet {
 			ensure!(!outcome_amount.is_zero(), Error::<T>::OutcomeAmountTooLow);
 
 			let now = <frame_system::Pallet<T>>::block_number();
-			use frame_support::sp_runtime::Saturating;
 			ensure!(
 				end.saturating_sub(now) >= T::MinMarketPeriod::get(),
 				Error::<T>::BelowMinMarketPeriod
@@ -311,7 +320,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		// TODO: What could be done instead of `Pays::Yes` to get the same effect? 
+		// TODO: What could be done instead of `Pays::Yes` to get the same effect?
 		// TODO: What does `DispatchClass::Normal` mean?
 		// TODO: Why could this `transactional` be useful here? Why is not used in other calls?
 		#[pallet::call_index(2)]
@@ -501,7 +510,7 @@ pub mod pallet {
 		}
 
 		pub fn emit_highest_outcomes(count: usize) -> Weight {
-			let total_weight = Weight::zero();
+			let mut total_weight = Weight::zero();
 			for (market_id, outcomes) in <Outcomes<T>>::iter().take(count) {
 				let highest_outcome = outcomes
 					.iter()
@@ -510,7 +519,7 @@ pub mod pallet {
 					.map(|(index, _)| index as u8);
 				Self::deposit_event(Event::HighestOutcome { market_id, highest_outcome });
 
-				total_weight.saturating_add(T::WeightInfo::do_something());
+				total_weight = total_weight.saturating_add(T::WeightInfo::do_something());
 			}
 			total_weight
 		}
