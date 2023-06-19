@@ -1,9 +1,9 @@
-// TODO: Why do we need the following line?
+// TODO 0: Why do we need the following line?
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
-// TODO: Why is it useful to write `pub` here?
+// TODO 1: Why is it useful to write `pub` here?
 pub use pallet::*;
 
 use codec::{Decode, Encode, MaxEncodedLen};
@@ -14,14 +14,14 @@ use frame_support::{
 
 use scale_info::TypeInfo;
 
-// TODO: Why do we typically have a `mock` module?
+// TODO 2: Why do we typically have a `mock` module?
 #[cfg(test)]
 mod mock;
 
 #[cfg(test)]
 mod tests;
 
-// TODO: What is this and what does it do?
+// TODO 3: What is this and what does it do?
 #[cfg(feature = "runtime-benchmarks")]
 mod benchmarking;
 
@@ -53,9 +53,9 @@ pub struct Outcome<AccountId, Balance> {
 	pub price: Balance,
 }
 
-// TODO: What are `CheckedDiv + Zero` called?
-// TODO: Why can't we just remove `CheckedDiv`?
-// TODO: What does `CheckedDiv + Zero` mean for `Balance`?
+// TODO 4: What are `CheckedDiv + Zero` called?
+// TODO 5: Why can't we just remove `CheckedDiv`?
+// TODO 6: What does `CheckedDiv + Zero` mean for `Balance`?
 impl<AccountId, Balance: CheckedDiv + Zero> Outcome<AccountId, Balance> {
 	pub fn p(&self, t: Balance) -> Balance {
 		self.price.checked_div(&t).unwrap_or(Zero::zero())
@@ -125,7 +125,7 @@ pub mod pallet {
 		type WeightInfo: WeightInfo;
 	}
 
-	// TODO: What does this do?
+	// TODO 7: What does this do?
 	#[pallet::type_value]
 	pub fn DefaultMarketCounter<T: Config>() -> MarketId {
 		1u128
@@ -190,13 +190,13 @@ pub mod pallet {
 		fn on_initialize(n: T::BlockNumber) -> Weight {
 			let mut total_weight = Weight::zero();
 
-			// TODO What comes to your mind when you see the `total_weight` calculation?
+			// TODO 8: What comes to your mind when you see the `total_weight` calculation?
 			total_weight = total_weight.saturating_add(T::DbWeight::get().reads(1));
 			let market_ids = <MarketIdsPerCloseBlock<T>>::get(n);
 			for market_id in market_ids {
 				total_weight = total_weight.saturating_add(T::DbWeight::get().reads(1));
 				if let Some(mut market) = <Markets<T>>::get(market_id) {
-					// TODO Why could this `debug_assert!` be useful here?
+					// TODO 9: Why could this `debug_assert!` be useful here?
 					debug_assert!(market.status == MarketStatus::Active, "MarketIdsPerCloseBlock should only contain active markets! Invalid market id: {:?}", market_id);
 					market.status = MarketStatus::Closed;
 					total_weight = total_weight.saturating_add(T::DbWeight::get().writes(1));
@@ -211,7 +211,7 @@ pub mod pallet {
 		}
 
 		fn on_finalize(n: T::BlockNumber) {
-			// TODO What should be kept in mind, when using `on_finalize`?
+			// TODO 10: What should be kept in mind, when using `on_finalize`?
 			Self::on_finalize_impl(n);
 		}
 
@@ -249,7 +249,7 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 
 			let bond = T::CreatorBond::get();
-			// TODO: Why do we check `can_reserve` here? Why not just using `reserve` alone?
+			// TODO 11:: Why do we check `can_reserve` here? Why not just using `reserve` alone?
 			ensure!(T::Currency::can_reserve(&who, bond), Error::<T>::InsufficientCreatorBalance);
 
 			ensure!(!outcome_amount.is_zero(), Error::<T>::OutcomeAmountTooLow);
@@ -273,7 +273,7 @@ pub mod pallet {
 
 			let market = Market {
 				creator: who.clone(),
-				// TODO: Why do we like to store the bond in the market? We could have just used
+				// TODO 12: Why do we like to store the bond in the market? We could have just used
 				// `T::CreatorBond::get()` for the unreserve call.
 				bond,
 				data: Default::default(),
@@ -290,7 +290,7 @@ pub mod pallet {
 				Ok(())
 			})?;
 
-			// TODO Why could we want to reserve the bond here?
+			// TODO 13: Why could we want to reserve the bond here?
 			T::Currency::reserve(&who, bond)?;
 
 			<Outcomes<T>>::insert(market_id, outcomes);
@@ -302,15 +302,15 @@ pub mod pallet {
 			Ok(())
 		}
 
-		// TODO What does `Pays::No` mean? Why is it only placed here?
-		// TODO What does `DispatchClass::Operational` mean? Why is it only placed here?
+		// TODO 14: What does `Pays::No` mean? Why is it only placed here?
+		// TODO 15: What does `DispatchClass::Operational` mean? Why is it only placed here?
 		#[pallet::call_index(1)]
 		#[pallet::weight((T::WeightInfo::do_something(), DispatchClass::Operational, Pays::No))]
 		pub fn destroy_market(
 			origin: OriginFor<T>,
 			#[pallet::compact] market_id: MarketId,
 		) -> DispatchResult {
-			// TODO Why didn't I use `ensure_root(origin)?;` here?
+			// TODO 16: Why didn't I use `ensure_root(origin)?;` here?
 			T::DestroyOrigin::ensure_origin(origin)?;
 
 			ensure!(Markets::<T>::contains_key(market_id), Error::<T>::MarketNotFound);
@@ -323,9 +323,9 @@ pub mod pallet {
 			Ok(())
 		}
 
-		// TODO: What could be done instead of `Pays::Yes` to get the same effect?
-		// TODO: What does `DispatchClass::Normal` mean?
-		// TODO: Why could this `transactional` be useful here? Why is not used in other calls?
+		// TODO 17: What could be done instead of `Pays::Yes` to get the same effect?
+		// TODO 18: What does `DispatchClass::Normal` mean?
+		// TODO 19: Why could this `transactional` be useful here? Why is not used in other calls?
 		#[pallet::call_index(2)]
 		#[pallet::weight((T::WeightInfo::do_something(), DispatchClass::Normal, Pays::Yes))]
 		#[frame_support::transactional]
@@ -385,8 +385,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		// TODO: What could the users do, if the oracle is not honest?
-		// TODO: What is done at Zeitgeist to solve this problem?
+		// TODO 20: What could the users do, if the oracle is not honest? What is done at Zeitgeist to solve this problem?
 		#[pallet::call_index(3)]
 		#[pallet::weight(T::WeightInfo::do_something())]
 		pub fn report_as_oracle(
@@ -473,7 +472,7 @@ pub mod pallet {
 			}
 
 			if who != market.creator {
-				// TODO Why don't I use a question mark operator here?
+				// TODO 21: Why don't I use a question mark operator here?
 				let res = T::Currency::repatriate_reserved(
 					&market.creator,
 					&who,
@@ -504,7 +503,7 @@ pub mod pallet {
 			});
 		}
 
-		// TODO What could be the purpose of this function?
+		// TODO 22: What could be the purpose of this function?
 		pub fn g(o: OutcomesOf<T>, i: u8) -> Result<BalanceOf<T>, DispatchError> {
 			use frame_support::sp_runtime::SaturatedConversion;
 			let t = o
@@ -554,7 +553,7 @@ pub mod pallet {
 	}
 }
 
-// TODO: Imagine this trait is defined outside of this pallet. Why could this be useful?
+// TODO 23: Imagine this trait is defined outside of this pallet. Why could this be useful?
 trait MarketApi {
 	type MarketId;
 	type AccountId;
