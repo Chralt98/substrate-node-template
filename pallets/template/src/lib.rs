@@ -82,7 +82,7 @@ pub mod pallet {
 
 	impl<T: Config> WeightInfo for Pallet<T> {
 		fn do_something() -> Weight {
-			Weight::zero()
+			Weight::from(1_000_000_000u64)
 		}
 	}
 
