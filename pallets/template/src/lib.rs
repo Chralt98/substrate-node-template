@@ -7,8 +7,10 @@ extern crate alloc;
 pub use pallet::*;
 
 use codec::{Decode, Encode, MaxEncodedLen};
-use frame_support::pallet_prelude::Weight;
-use frame_support::sp_runtime::traits::{CheckedDiv, Zero};
+use frame_support::{
+	pallet_prelude::Weight,
+	sp_runtime::traits::{CheckedDiv, Zero},
+};
 
 use scale_info::TypeInfo;
 
@@ -68,20 +70,21 @@ pub trait WeightInfo {
 pub mod pallet {
 	use super::*;
 	use alloc::vec::Vec;
-	use frame_support::pallet_prelude::*;
-	use frame_support::sp_runtime::traits::{CheckedSub, One};
-	use frame_support::traits::{
-		BalanceStatus, Currency, ExistenceRequirement, ReservableCurrency, WithdrawReasons,
+	use frame_support::{
+		pallet_prelude::*,
+		sp_runtime::traits::{CheckedSub, One, Saturating},
+		traits::{
+			BalanceStatus, Currency, ExistenceRequirement, ReservableCurrency, WithdrawReasons,
+		},
+		PalletId,
 	};
-	use frame_support::PalletId;
 	use frame_system::pallet_prelude::*;
-    use frame_support::sp_runtime::traits::Saturating;
 
-    impl<T: Config> WeightInfo for Pallet<T> {
-        fn do_something() -> Weight {
-            Weight::zero()
-        }
-    }
+	impl<T: Config> WeightInfo for Pallet<T> {
+		fn do_something() -> Weight {
+			Weight::zero()
+		}
+	}
 
 	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
@@ -105,6 +108,8 @@ pub mod pallet {
 
 		#[pallet::constant]
 		type CreatorBond: Get<BalanceOf<Self>>;
+
+		type DestroyOrigin: EnsureOrigin<Self::Origin>;
 
 		#[pallet::constant]
 		type MarketCreatorClearStorageTime: Get<Self::BlockNumber>;
@@ -163,9 +168,7 @@ pub mod pallet {
 
 	#[pallet::error]
 	pub enum Error<T> {
-		OutcomesStorageOverflow,
-		MarketCounterStorageOverflow,
-		MarketIdsPerCloseBlockStorageOverflow,
+		StorageOverflow(u8),
 		InvalidOutcomeIndex,
 		MarketNotFound,
 		PriceTooLow,
@@ -213,9 +216,7 @@ pub mod pallet {
 		}
 
 		fn on_idle(_n: T::BlockNumber, mut remaining_weight: Weight) -> Weight {
-			if let Some(count) = remaining_weight.checked_div(T::WeightInfo::do_something())
-			{
-				// assume this `emit_highest_outcomes` has `do_something` weight
+			if let Some(count) = remaining_weight.checked_div(T::WeightInfo::do_something()) {
 				let consumed_weight = Self::emit_highest_outcomes(count as usize);
 				remaining_weight = remaining_weight.saturating_sub(consumed_weight);
 			}
@@ -260,19 +261,20 @@ pub mod pallet {
 			);
 
 			let market_id = Self::market_counter();
-			let new_counter =
-				market_id.checked_add(1).ok_or(Error::<T>::MarketCounterStorageOverflow)?;
+			let new_counter = market_id.checked_add(1).ok_or(Error::<T>::StorageOverflow(0u8))?;
 
 			debug_assert!(!Markets::<T>::contains_key(market_id));
 
 			let mut outcomes = Outcomes::<T>::get(market_id);
 			for i in 0..outcome_amount {
 				let outcome = Outcome { owner: who.clone(), data: [i; 32], price: Zero::zero() };
-				outcomes.try_push(outcome).map_err(|_| Error::<T>::OutcomesStorageOverflow)?;
+				outcomes.try_push(outcome).map_err(|_| Error::<T>::StorageOverflow(1u8))?;
 			}
 
 			let market = Market {
 				creator: who.clone(),
+				// TODO: Why do we like to store the bond in the market? We could have just used
+				// `T::CreatorBond::get()` for the unreserve call.
 				bond,
 				data: Default::default(),
 				end,
@@ -284,7 +286,7 @@ pub mod pallet {
 			MarketIdsPerCloseBlock::<T>::try_mutate(end, |prev_market_ids| -> DispatchResult {
 				prev_market_ids
 					.try_push(market_id)
-					.map_err(|_| <Error<T>>::MarketIdsPerCloseBlockStorageOverflow)?;
+					.map_err(|_| <Error<T>>::StorageOverflow(2u8))?;
 				Ok(())
 			})?;
 
@@ -308,7 +310,8 @@ pub mod pallet {
 			origin: OriginFor<T>,
 			#[pallet::compact] market_id: MarketId,
 		) -> DispatchResult {
-			ensure_root(origin)?;
+			// TODO Why didn't I use `ensure_root(origin)?;` here?
+			T::DestroyOrigin::ensure_origin(origin)?;
 
 			ensure!(Markets::<T>::contains_key(market_id), Error::<T>::MarketNotFound);
 
@@ -373,6 +376,9 @@ pub mod pallet {
 			T::Currency::transfer(&who, &market_account, price, ExistenceRequirement::AllowDeath)?;
 
 			outcome.owner = who.clone();
+			outcome.price = price;
+
+			<Outcomes<T>>::insert(market_id, outcomes);
 
 			Self::deposit_event(Event::OutcomeBought { market_id, outcome_index, buyer: who });
 
@@ -420,6 +426,7 @@ pub mod pallet {
 
 			let reported_index =
 				market.oracle_outcome_report.ok_or(Error::<T>::OutcomeNotReportedYet)?;
+			debug_assert!(market.status == MarketStatus::Reported);
 
 			let outcomes = <Outcomes<T>>::get(market_id);
 			let outcome =
@@ -490,7 +497,7 @@ pub mod pallet {
 			let next_block = n.saturating_add(One::one());
 			let market_ids_to_close_next_block = <MarketIdsPerCloseBlock<T>>::get(next_block);
 			if market_ids_to_close_next_block.is_empty() {
-				return;
+				return
 			}
 			Self::deposit_event(Event::MarketsToCloseNextBlock {
 				market_ids: market_ids_to_close_next_block.into_inner(),
