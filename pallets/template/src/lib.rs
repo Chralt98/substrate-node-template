@@ -497,7 +497,7 @@ pub mod pallet {
 			let next_block = n.saturating_add(One::one());
 			let market_ids_to_close_next_block = <MarketIdsPerCloseBlock<T>>::get(next_block);
 			if market_ids_to_close_next_block.is_empty() {
-				return
+				return;
 			}
 			Self::deposit_event(Event::MarketsToCloseNextBlock {
 				market_ids: market_ids_to_close_next_block.into_inner(),
