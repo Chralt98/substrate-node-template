@@ -46,7 +46,7 @@ pub struct Market<AccountId, BlockNumber, Balance> {
 	pub status: MarketStatus,
 }
 
-#[derive(Decode, Encode, MaxEncodedLen, TypeInfo, Clone, Debug, PartialEq, Eq)]
+#[derive(Decode, Encode, TypeInfo, Clone, Debug, PartialEq, Eq)]
 pub struct Outcome<AccountId, Balance> {
 	pub owner: AccountId,
 	pub data: [u8; 32],
@@ -58,7 +58,7 @@ pub struct Outcome<AccountId, Balance> {
 // TODO 6: What does `CheckedDiv + Zero` mean for `Balance`?
 impl<AccountId, Balance: CheckedDiv + Zero> Outcome<AccountId, Balance> {
 	pub fn p(&self, t: Balance) -> Balance {
-		self.price.checked_div(&t).unwrap_or(Zero::zero())
+		self.price.checked_div(&t).unwrap_or_else(Zero::zero())
 	}
 }
 
@@ -72,7 +72,7 @@ pub mod pallet {
 	use alloc::vec::Vec;
 	use frame_support::{
 		pallet_prelude::*,
-		sp_runtime::traits::{CheckedSub, One, Saturating},
+		sp_runtime::traits::{CheckedSub, Saturating},
 		traits::{
 			BalanceStatus, Currency, ExistenceRequirement, ReservableCurrency, WithdrawReasons,
 		},
@@ -102,14 +102,14 @@ pub mod pallet {
 
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 
 		type Currency: ReservableCurrency<Self::AccountId>;
 
 		#[pallet::constant]
 		type CreatorBond: Get<BalanceOf<Self>>;
 
-		type DestroyOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+		type DestroyOrigin: EnsureOrigin<Self::Origin>;
 
 		#[pallet::constant]
 		type MarketCreatorClearStorageTime: Get<Self::BlockNumber>;
@@ -138,7 +138,7 @@ pub mod pallet {
 
 	#[pallet::storage]
 	pub type Markets<T: Config> =
-		StorageMap<_, Blake2_128Concat, MarketId, MarketOf<T>, OptionQuery>;
+		StorageMap<_, Blake2_128Concat, MarketId, MarketOf<T>, ValueQuery>;
 
 	#[pallet::storage]
 	pub type Outcomes<T: Config> =
@@ -154,8 +154,8 @@ pub mod pallet {
 	>;
 
 	#[pallet::event]
-	#[pallet::generate_deposit(pub(super) fn deposit_event)]
-	pub enum Event<T: Config> {
+    #[pallet::generate_deposit(pub(super) fn deposit_event)]
+	pub enum Event<T> {
 		MarketCreated { market_id: MarketId, creator: T::AccountId },
 		MarketDestroyed { market_id: MarketId },
 		OutcomeBought { market_id: MarketId, outcome_index: u8, buyer: T::AccountId },
@@ -195,13 +195,13 @@ pub mod pallet {
 			let market_ids = <MarketIdsPerCloseBlock<T>>::get(n);
 			for market_id in market_ids {
 				total_weight = total_weight.saturating_add(T::DbWeight::get().reads(1));
-				if let Some(mut market) = <Markets<T>>::get(market_id) {
+				if let Ok(mut market) = <Markets<T>>::get(market_id) {
 					// TODO 9: Why could this `debug_assert!` be useful here?
 					debug_assert!(market.status == MarketStatus::Active, "MarketIdsPerCloseBlock should only contain active markets! Invalid market id: {:?}", market_id);
 					market.status = MarketStatus::Closed;
 					total_weight = total_weight.saturating_add(T::DbWeight::get().writes(1));
 					<Markets<T>>::insert(market_id, market);
-					Self::deposit_event(Event::MarketClosed { market_id });
+					deposit_event(Event::MarketClosed { market_id });
 				};
 			}
 			total_weight = total_weight.saturating_add(T::DbWeight::get().writes(1));
@@ -216,8 +216,8 @@ pub mod pallet {
 		}
 
 		fn on_idle(_n: T::BlockNumber, mut remaining_weight: Weight) -> Weight {
-			if let Some(count) = remaining_weight.checked_div(T::WeightInfo::do_something().ref_time()) {
-				let consumed_weight = Self::emit_highest_outcomes(count.ref_time() as usize);
+			if let Some(count) = remaining_weight.checked_div(T::WeightInfo::do_something()) {
+				let consumed_weight = Self::emit_highest_outcomes(count);
 				remaining_weight = remaining_weight.saturating_sub(consumed_weight);
 			}
 
@@ -245,7 +245,7 @@ pub mod pallet {
 			#[pallet::compact] outcome_amount: u8,
 			end: T::BlockNumber,
 			oracle: T::AccountId,
-		) -> DispatchResult {
+		) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
 
 			let bond = T::CreatorBond::get();
@@ -268,7 +268,7 @@ pub mod pallet {
 			let mut outcomes = Outcomes::<T>::get(market_id);
 			for i in 0..outcome_amount {
 				let outcome = Outcome { owner: who.clone(), data: [i; 32], price: Zero::zero() };
-				outcomes.try_push(outcome).map_err(|_| Error::<T>::StorageOverflow(1u8))?;
+				outcomes.push(outcome).map_err(|_| Error::<T>::StorageOverflow(1u8))?;
 			}
 
 			let market = Market {
@@ -283,11 +283,10 @@ pub mod pallet {
 				status: MarketStatus::Active,
 			};
 
-			MarketIdsPerCloseBlock::<T>::try_mutate(end, |prev_market_ids| -> DispatchResult {
+			MarketIdsPerCloseBlock::<T>::mutate(end, |prev_market_ids| {
 				prev_market_ids
 					.try_push(market_id)
 					.map_err(|_| <Error<T>>::StorageOverflow(2u8))?;
-				Ok(())
 			})?;
 
 			// TODO 13: Why could we want to reserve the bond here?
@@ -304,12 +303,12 @@ pub mod pallet {
 
 		// TODO 14: What does `Pays::No` mean? Why is it only placed here?
 		// TODO 15: What does `DispatchClass::Operational` mean? Why is it only placed here?
-		#[pallet::call_index(1)]
+		#[pallet::call_index(0)]
 		#[pallet::weight((T::WeightInfo::do_something(), DispatchClass::Operational, Pays::No))]
 		pub fn destroy_market(
 			origin: OriginFor<T>,
 			#[pallet::compact] market_id: MarketId,
-		) -> DispatchResult {
+		) -> DispatchResultWithPostInfo {
 			// TODO 16: Why didn't I use `ensure_root(origin)?;` here?
 			T::DestroyOrigin::ensure_origin(origin)?;
 
@@ -327,14 +326,14 @@ pub mod pallet {
 		// TODO 18: What does `DispatchClass::Normal` mean?
 		// TODO 19: Why could this `transactional` be useful here? Why is not used in other calls?
 		#[pallet::call_index(2)]
-		#[pallet::weight((T::WeightInfo::do_something(), DispatchClass::Normal, Pays::Yes))]
+		#[pallet::weight(T::WeightInfo::do_something(), DispatchClass::Normal, Pays::Yes)]
 		#[frame_support::transactional]
 		pub fn buy_outcome(
 			origin: OriginFor<T>,
 			#[pallet::compact] market_id: MarketId,
 			#[pallet::compact] outcome_index: u8,
 			#[pallet::compact] price: BalanceOf<T>,
-		) -> DispatchResult {
+		) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
 
 			let buyer_balance = T::Currency::free_balance(&who);
@@ -348,11 +347,11 @@ pub mod pallet {
 			)?;
 
 			let market = <Markets<T>>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
-			ensure!(market.status == MarketStatus::Active, Error::<T>::MarketNotActive);
+			ensure!(matches!(market.status == MarketStatus::Active), Error::<T>::MarketNotActive);
 
 			let mut outcomes = Outcomes::<T>::get(market_id);
-			let outcome = outcomes
-				.get_mut(outcome_index as usize)
+			let mut outcome = outcomes
+				.get_mut(outcome_index)
 				.ok_or(Error::<T>::InvalidOutcomeIndex)?;
 			ensure!(outcome.price < price, Error::<T>::PriceTooLow);
 
@@ -392,7 +391,7 @@ pub mod pallet {
 			origin: OriginFor<T>,
 			#[pallet::compact] market_id: MarketId,
 			#[pallet::compact] outcome_index: u8,
-		) -> DispatchResult {
+		) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
 
 			let mut market = <Markets<T>>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
@@ -401,9 +400,9 @@ pub mod pallet {
 			ensure!(market.status == MarketStatus::Closed, Error::<T>::InvalidMarketStatus);
 			ensure!(market.oracle == who, Error::<T>::CallerNotOracle);
 
+			<Markets<T>>::insert(market_id, market);
 			market.oracle_outcome_report = Some(outcome_index);
 			market.status = MarketStatus::Reported;
-			<Markets<T>>::insert(market_id, market);
 
 			Self::deposit_event(Event::MarketReported {
 				market_id,
@@ -417,8 +416,8 @@ pub mod pallet {
 		#[pallet::weight(T::WeightInfo::do_something())]
 		pub fn redeem(
 			origin: OriginFor<T>,
-			#[pallet::compact] market_id: MarketId,
-		) -> DispatchResult {
+			#[pallet::compact] market_id: Vec<MarketId>,
+		) -> DispatchResultWithPostInfo {
 			ensure_signed(origin)?;
 
 			let mut market = <Markets<T>>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
@@ -437,8 +436,8 @@ pub mod pallet {
 			let reward = T::Currency::free_balance(&market_account);
 			T::Currency::transfer(
 				&market_account,
-				winner,
 				reward,
+				winner,
 				ExistenceRequirement::AllowDeath,
 			)?;
 
@@ -448,7 +447,7 @@ pub mod pallet {
 			Self::deposit_event(Event::MarketRedeemed {
 				market_id,
 				winner_outcome: reported_index,
-				winner: winner.clone(),
+				winner: *winner,
 			});
 
 			Ok(())
@@ -459,7 +458,7 @@ pub mod pallet {
 		pub fn clear_storage(
 			origin: OriginFor<T>,
 			#[pallet::compact] market_id: MarketId,
-		) -> DispatchResult {
+		) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
 
 			let market = <Markets<T>>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
@@ -498,9 +497,7 @@ pub mod pallet {
 			if market_ids_to_close_next_block.is_empty() {
 				return;
 			}
-			Self::deposit_event(Event::MarketsToCloseNextBlock {
-				market_ids: market_ids_to_close_next_block.into_inner(),
-			});
+			Self::deposit_event(Event::MarketsToCloseNextBlock(market_ids_to_close_next_block));
 		}
 
 		// TODO 22: What could be the purpose of this function?
@@ -515,14 +512,14 @@ pub mod pallet {
 			Ok(u.p(t))
 		}
 
-		pub fn emit_highest_outcomes(count: usize) -> Weight {
+		pub fn emit_highest_outcomes(count: u64) -> Weight {
 			let mut total_weight = Weight::zero();
 			for (market_id, outcomes) in <Outcomes<T>>::iter().take(count) {
 				let highest_outcome = outcomes
 					.iter()
 					.enumerate()
-					.max_by_key(|(_, outcome)| outcome.price)
-					.map(|(index, _)| index as u8);
+					.max_by_key(|(_, outcome, _)| outcome.price)
+					.map(|(index, _, _)| index as u8);
 				Self::deposit_event(Event::HighestOutcome { market_id, highest_outcome });
 
 				total_weight = total_weight.saturating_add(T::WeightInfo::do_something());
@@ -536,7 +533,7 @@ pub mod pallet {
 		}
 	}
 
-	impl<T: Config> MarketApi for Pallet<T>
+	impl<T> MarketApi for Pallet<T>
 	{
 		type MarketId = MarketId;
 		type AccountId = T::AccountId;
@@ -556,14 +553,14 @@ trait MarketApi {
 	type MarketId;
 	type AccountId;
 	type Balance;
-	type BlockNumber;
+    type BlockNumber;
 
 	fn get_market(
 		market_id: &Self::MarketId,
 	) -> Result<
 		(
 			frame_support::pallet_prelude::Weight,
-			Market<Self::AccountId, Self::BlockNumber, Self::Balance>,
+			Market<Self::AccountId, Self::Balance>,
 		),
 		frame_support::pallet_prelude::DispatchError,
 	>;
