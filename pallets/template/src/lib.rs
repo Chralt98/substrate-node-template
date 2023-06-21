@@ -242,6 +242,7 @@ pub mod pallet {
 		#[pallet::weight(T::WeightInfo::do_something())]
 		pub fn create_market(
 			origin: OriginFor<T>,
+			data: [u8; 32],
 			#[pallet::compact] outcome_amount: u8,
 			end: T::BlockNumber,
 			oracle: T::AccountId,
@@ -276,7 +277,7 @@ pub mod pallet {
 				// TODO 12: Why do we like to store the bond in the market? We could have just used
 				// `T::CreatorBond::get()` for the unreserve call.
 				bond,
-				data: Default::default(),
+				data,
 				end,
 				oracle,
 				oracle_outcome_report: None,
